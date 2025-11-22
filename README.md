@@ -15,8 +15,8 @@ Dieses Repository enthält einen Arduino-Sketch für einen lokalen OCPP 1.6 Edge
 ## Voraussetzungen
 - **Arduino IDE** mit Board-Unterstützung für **Nicla Vision**.
 - Bibliotheken über den Arduino Library Manager installieren:
-  - `WiFiNINA_Generic` (statt `WiFiNINA`, damit die Nicla Vision unter `mbed_nicla` erkannt wird)
-  - `ArduinoWebsockets_Generic`
+  - `WiFiNINA` (Standardbibliothek, wird mit der Nicla-Vision-Boardunterstützung erkannt – kein `WiFiNINA_Generic`-Override nötig)
+  - `ArduinoWebsockets` (by **gilmaimon**, verfügbar im Library Manager)
 
 ## Einrichtung
 1. Arduino IDE öffnen und `arduino/nicla_vision_ocpp_gateway/nicla_vision_ocpp_gateway.ino` laden.
