@@ -4,7 +4,7 @@
 // where the architecture name is not recognised (e.g. mbed_nicla).
 #define WEBSOCKETS_NETWORK_TYPE NETWORK_WIFININA
 
-#include <WiFiNINA_Generic.h>
+#include <WiFiNINA.h>
 #include <ArduinoWebsockets_Generic.h>
 
 using namespace websockets;
