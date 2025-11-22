@@ -14,8 +14,8 @@ An OCPP 1.6 edge gateway sketch for the Nicla Vision that terminates up to 10 lo
 - Falls back to a setup hotspot (`NiclaGateway-Setup` / `setup1234`) when the configured Wi‑Fi cannot be reached.
 
 ### Required Libraries
-- **WiFiNINA**
-- **ArduinoWebsockets** (installable from the Arduino Library Manager)
+- **WiFiNINA_Generic** (Arduino Library Manager; recognises the Nicla Vision under `mbed_nicla`)
+- **ArduinoWebsockets_Generic** (installable from the Arduino Library Manager)
 
 ### Uploading
 1. Open `arduino/nicla_vision_ocpp_gateway/nicla_vision_ocpp_gateway.ino` in the Arduino IDE.

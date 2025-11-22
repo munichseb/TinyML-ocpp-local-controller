@@ -1,7 +1,11 @@
 #include <Arduino.h>
 #include <SPI.h>
-#include <WiFiNINA.h>
-#include <ArduinoWebsockets.h>
+// Force ArduinoWebsockets to use the WiFiNINA transport even on platforms
+// where the architecture name is not recognised (e.g. mbed_nicla).
+#define WEBSOCKETS_NETWORK_TYPE NETWORK_WIFININA
+
+#include <WiFiNINA_Generic.h>
+#include <ArduinoWebsockets_Generic.h>
 
 using namespace websockets;
 
