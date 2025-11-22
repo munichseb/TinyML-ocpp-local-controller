@@ -6,7 +6,7 @@
 using namespace websockets;
 
 const char *defaultSsid = "FiberWAN";
-const char *defaultPassword = "sommer17";
+const char *defaultPassword = "winter28";
 
 // Configuration that can be changed via the web UI
 String configuredSsid = defaultSsid;
