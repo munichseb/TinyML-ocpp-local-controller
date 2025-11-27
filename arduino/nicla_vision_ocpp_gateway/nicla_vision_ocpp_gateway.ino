@@ -14,7 +14,9 @@ using namespace websockets;
 class WiFiNinaTcpServer : public websockets::network::TcpServer
 {
 public:
-  WiFiNinaTcpServer() {}
+  // WiFiServer does not provide a default constructor, so initialize with a
+  // dummy port and reassign when listen() is called.
+  WiFiNinaTcpServer() : server(0) {}
 
   bool poll() override
   {
