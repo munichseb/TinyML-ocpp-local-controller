@@ -3,8 +3,75 @@
 
 #include <WiFiNINA.h>
 #include <ArduinoWebsockets.h>
+#include <tiny_websockets/network/tcp_server.hpp>
+#include <tiny_websockets/network/generic_esp/generic_esp_clients.hpp>
 
 using namespace websockets;
+
+// The ArduinoWebsockets library does not ship a default TcpServer implementation
+// for the Nicla Vision (WiFiNINA) platform, so we provide a minimal adapter that
+// wraps WiFiServer/WiFiClient.
+class WiFiNinaTcpServer : public websockets::network::TcpServer
+{
+public:
+  WiFiNinaTcpServer() {}
+
+  bool poll() override
+  {
+    yield();
+    return server.available();
+  }
+
+  bool listen(const uint16_t port) override
+  {
+    yield();
+    server = WiFiServer(port);
+    server.begin();
+    return available();
+  }
+
+  websockets::network::TcpClient *accept() override
+  {
+    while (available())
+    {
+      auto client = server.available();
+      if (client)
+      {
+        return new websockets::network::GenericEspTcpClient<WiFiClient>(client);
+      }
+    }
+    return new websockets::network::GenericEspTcpClient<WiFiClient>();
+  }
+
+  bool available() override
+  {
+    yield();
+    return static_cast<bool>(server);
+  }
+
+  void close() override
+  {
+    yield();
+    server.stop();
+  }
+
+  virtual ~WiFiNinaTcpServer()
+  {
+    if (available())
+    {
+      close();
+    }
+  }
+
+protected:
+  int getSocket() const override
+  {
+    return -1;
+  }
+
+private:
+  WiFiServer server;
+};
 
 const char *defaultSsid = "FiberWAN";
 const char *defaultPassword = "winter28";
@@ -17,7 +84,8 @@ int backendPort = 8081;
 
 // Networking
 WiFiServer httpServer(80);
-WebsocketsServer wsServer;
+WiFiNinaTcpServer ninaTcpServer;
+WebsocketsServer wsServer(&ninaTcpServer);
 WebsocketsClient backendSocket;
 
 // Wallbox connections
