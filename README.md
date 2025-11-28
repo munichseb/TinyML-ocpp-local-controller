@@ -15,8 +15,8 @@ Dieses Repository enthält einen Arduino-Sketch für einen lokalen OCPP 1.6 Edge
 ## Voraussetzungen
 - **Arduino IDE** mit Board-Unterstützung für **Nicla Vision**.
 - Bibliotheken über den Arduino Library Manager installieren:
-  - `WiFiNINA` (Standardbibliothek, wird mit der Nicla-Vision-Boardunterstützung erkannt – kein `WiFiNINA_Generic`-Override nötig)
-  - `ArduinoWebsockets` (by **gilmaimon**, verfügbar im Library Manager)
+  - `ArduinoHttpServer` (verfügbar im Library Manager)
+  - `WebSockets2_Generic` (verfügbar im Library Manager)
 
 ## Einrichtung
 1. Arduino IDE öffnen und `arduino/nicla_vision_ocpp_gateway/nicla_vision_ocpp_gateway.ino` laden.
@@ -26,7 +26,7 @@ Dieses Repository enthält einen Arduino-Sketch für einen lokalen OCPP 1.6 Edge
 5. Serielle Konsole mit **115200 Baud** öffnen, um IP-Adresse und WLAN-Status zu prüfen.
 
 ## Konfiguration & Nutzung
-- **Standard-WLAN**: SSID `FiberWAN`, Passwort `sommer17`. Bei fehlgeschlagenem Verbindungsaufbau wird automatisch der Setup-Hotspot `NiclaGateway-Setup` mit Passwort `setup1234` aktiviert.
+- **Standard-WLAN**: Kann im Code hinterlegt werden. Bei fehlgeschlagenem Verbindungsaufbau wird automatisch der Setup-Hotspot `NiclaGateway-Setup` mit Passwort `setup1234` aktiviert.
 - **Dashboard aufrufen**: Browser aufrufen und `http://<device-ip>/` öffnen (IP aus der seriellen Konsole oder aus dem Setup-Hotspot ermitteln).
 - **Backend konfigurieren**: Im Dashboard Host/IP und Port eintragen. Das Gerät baut dann automatisch eine WebSocket-Verbindung zum Backend auf.
 - **Wallbox verbinden**: Wallbox per WebSocket auf `ws://<device-ip>:8080/` konfigurieren. Bis zu zehn Wallboxen können parallel verbunden werden.
