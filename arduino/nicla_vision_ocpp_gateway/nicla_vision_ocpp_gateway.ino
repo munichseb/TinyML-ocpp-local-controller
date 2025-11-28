@@ -3,7 +3,6 @@
 
 #include <WiFiNINA.h>
 
-#include <tiny_websockets/network/generic_esp_tcp_client.hpp>
 #include <tiny_websockets/network/tcp_server.hpp>
 
 // The ArduinoWebsockets library only defines a WSDefaultTcpServer for ESP and
@@ -22,6 +21,81 @@ public:
   WiFiClientWithNoDelay(const WiFiClient &client) : WiFiClient(client) {}
 
   void setNoDelay(bool) {}
+};
+
+// The ArduinoWebsockets library provides GenericEspTcpClient implementations for
+// ESP8266/ESP32 targets, but it does not ship an adapter for WiFiNINA-based
+// boards like the Nicla Vision. Provide a minimal TcpClient wrapper around
+// WiFiClient so the gateway can accept and initiate websocket connections
+// without relying on headers that are unavailable on this platform.
+class WiFiNinaTcpClient : public websockets::network::TcpClient
+{
+public:
+  WiFiNinaTcpClient() = default;
+  explicit WiFiNinaTcpClient(const WiFiClientWithNoDelay &client) : client(client) {}
+
+  bool poll() override
+  {
+    yield();
+    return client.connected();
+  }
+
+  bool available() override
+  {
+    yield();
+    return client.connected();
+  }
+
+  void close() override
+  {
+    yield();
+    client.stop();
+  }
+
+  bool connect(const WSString &host, int port) override
+  {
+    yield();
+    return client.connect(host.c_str(), port);
+  }
+
+  void send(const WSString &data) override
+  {
+    yield();
+    client.write(reinterpret_cast<const uint8_t *>(data.c_str()), data.length());
+  }
+
+  void send(const WSString &&data) override
+  {
+    send(data);
+  }
+
+  void send(const uint8_t *data, const uint32_t len) override
+  {
+    yield();
+    client.write(data, len);
+  }
+
+  WSString readLine() override
+  {
+    yield();
+    return client.readStringUntil('\n');
+  }
+
+  uint32_t read(uint8_t *buffer, const uint32_t len) override
+  {
+    yield();
+    int result = client.read(buffer, len);
+    return result < 0 ? 0 : static_cast<uint32_t>(result);
+  }
+
+protected:
+  int getSocket() const override
+  {
+    return -1;
+  }
+
+private:
+  WiFiClientWithNoDelay client;
 };
 
 // The ArduinoWebsockets library does not ship a default TcpServer implementation
@@ -55,10 +129,10 @@ public:
       auto client = server.available();
       if (client)
       {
-        return new websockets::network::GenericEspTcpClient<WiFiClientWithNoDelay>(WiFiClientWithNoDelay(client));
+        return new WiFiNinaTcpClient(WiFiClientWithNoDelay(client));
       }
     }
-    return new websockets::network::GenericEspTcpClient<WiFiClientWithNoDelay>();
+    return new WiFiNinaTcpClient();
   }
 
   bool available() override
