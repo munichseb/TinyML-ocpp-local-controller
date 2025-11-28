@@ -2,26 +2,25 @@
 #include <SPI.h>
 
 #include <WiFiNINA.h>
-
-// The ArduinoWebsockets library only defines a WSDefaultTcpServer for ESP and
-// Teensy targets. For the Nicla Vision we need to provide our own type so the
-// default constructor in server.hpp compiles.
-class WiFiNinaTcpServer;
-#define WSDefaultTcpServer WiFiNinaTcpServer
+#include <tiny_websockets/network/tcp_server.hpp>
+#include <tiny_websockets/network/generic_esp/generic_esp_clients.hpp>
 
 // WiFiClient on the Nicla Vision does not support setNoDelay(). The generic ESP
 // client wrapper used by ArduinoWebsockets expects it, so add a no-op stub.
 class WiFiClientWithNoDelay : public WiFiClient
 {
 public:
+  WiFiClientWithNoDelay() = default;
+  WiFiClientWithNoDelay(const WiFiClient &client) : WiFiClient(client) {}
+
   void setNoDelay(bool) {}
 };
 
-#include <ArduinoWebsockets.h>
-#include <tiny_websockets/network/tcp_server.hpp>
-#include <tiny_websockets/network/generic_esp/generic_esp_clients.hpp>
-
-using namespace websockets;
+// The ArduinoWebsockets library only defines a WSDefaultTcpServer for ESP and
+// Teensy targets. For the Nicla Vision we need to provide our own type so the
+// default constructor in server.hpp compiles.
+class WiFiNinaTcpServer;
+#define WSDefaultTcpServer WiFiNinaTcpServer
 
 // The ArduinoWebsockets library does not ship a default TcpServer implementation
 // for the Nicla Vision (WiFiNINA) platform, so we provide a minimal adapter that
@@ -54,7 +53,7 @@ public:
       auto client = server.available();
       if (client)
       {
-        return new websockets::network::GenericEspTcpClient<WiFiClientWithNoDelay>(client);
+        return new websockets::network::GenericEspTcpClient<WiFiClientWithNoDelay>(WiFiClientWithNoDelay(client));
       }
     }
     return new websockets::network::GenericEspTcpClient<WiFiClientWithNoDelay>();
@@ -69,7 +68,7 @@ public:
   void close() override
   {
     yield();
-    server.stop();
+    server.end();
   }
 
   virtual ~WiFiNinaTcpServer()
@@ -89,6 +88,10 @@ protected:
 private:
   WiFiServer server;
 };
+
+#include <ArduinoWebsockets.h>
+
+using namespace websockets;
 
 const char *defaultSsid = "FiberWAN";
 const char *defaultPassword = "winter28";
