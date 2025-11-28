@@ -33,6 +33,15 @@
 #include <WebSockets2_Generic.h>
 #include <WiFiWebServer.h>
 
+// Some versions of the WebSockets2_Generic library fail to define
+// WSDefaultTcpServer on Nicla Vision builds, which leads to a
+// "expected type-specifier" error when constructing the WebSockets
+// server.  Fall back to the WiFiNINA-backed TcpServer implementation
+// if the macro is missing after including the library headers.
+#ifndef WSDefaultTcpServer
+#define WSDefaultTcpServer websockets2_generic::network2_generic::WiFiNINATcpServer
+#endif
+
 // Detect availability of the Mbed FlashIAP + TDBStore stack.  Boards or cores
 // that do not ship these headers will automatically disable flash-backed
 // storage so the sketch can still compile.  Some platforms ship the headers
