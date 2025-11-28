@@ -52,13 +52,14 @@
 // Honor a user-provided definition.
 #elif defined(MBED_CONF_STORAGE_TDB_INTERNAL) && (MBED_CONF_STORAGE_TDB_INTERNAL == 0)
 #define HAS_MBED_FLASH 0
-#elif __has_include(<FlashIAPBlockDevice.h>) && __has_include(<TDBStore.h>)
+#elif __has_include(<FlashIAPBlockDevice.h>) && __has_include(<TDBStore.h>) && __has_include(<FlashIAP.h>)
 #define HAS_MBED_FLASH 1
 #else
 #define HAS_MBED_FLASH 0
 #endif
 
 #if HAS_MBED_FLASH
+#include <FlashIAP.h>
 #include <FlashIAPBlockDevice.h>
 #include <TDBStore.h>
 
