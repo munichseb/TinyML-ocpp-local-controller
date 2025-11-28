@@ -140,8 +140,11 @@ bool initStorage() {
 // HTTP server on port 80 for configuration dashboard
 WiFiWebServer httpServer(80);
 
-// WebSockets server on port 8080 for wallboxes
-WebsocketsServer wsServer;
+// WebSockets server on port 8080 for wallboxes.  Recent versions of the
+// WebSockets2_Generic library require explicitly passing a TcpServer
+// instance to the constructor, so build one using the default network
+// implementation selected via WEBSOCKETS_NETWORK_TYPE.
+WebsocketsServer wsServer(new WSDefaultTcpServer());
 
 // Array of client connections for wallboxes
 WebsocketsClient wallboxClients[MAX_WALLBOX_CLIENTS];
