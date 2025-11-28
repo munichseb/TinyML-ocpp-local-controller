@@ -19,6 +19,8 @@ An OCPP 1.6 edge gateway sketch for the Nicla Vision that terminates up to 10 lo
 
 > ℹ️ If you see a compiler error such as `ArduinoWebsockets_Generic.h: No such file or directory`, install the library named **ArduinoWebsockets** (by gilmaimon) from the Library Manager. The sketch only includes `ArduinoWebsockets.h`, and the official library provides that header. In case the Library Manager listing is unavailable in your setup, you can manually install it by downloading the ZIP from <https://github.com/gilmaimon/ArduinoWebsockets> and choosing **Sketch → Include Library → Add .ZIP Library…** in the Arduino IDE.
 
+> ℹ️ If the IDE reports `tiny_websockets/network/tcp_server.hpp: No such file or directory`, it is the same missing **ArduinoWebsockets** library. Installing it via the Library Manager (or from the ZIP linked above) supplies the `tiny_websockets` headers used by the sketch.
+
 > 💡 If you come across older guides mentioning `WiFiNINA_Generic`, you can ignore that workaround on current Nicla Vision packages. The standard `WiFiNINA` works out of the box with **ArduinoWebsockets**.
 
 ### Uploading
