@@ -2,8 +2,14 @@
 #include <SPI.h>
 
 #include <WiFiNINA.h>
-#include <tiny_websockets/network/tcp_server.hpp>
-#include <tiny_websockets/network/generic_esp/generic_esp_clients.hpp>
+
+// The ArduinoWebsockets library only defines a WSDefaultTcpServer for ESP and
+// Teensy targets. For the Nicla Vision we need to provide our own type so the
+// default constructor in server.hpp compiles.
+class WiFiNinaTcpServer;
+#define WSDefaultTcpServer WiFiNinaTcpServer
+
+#include <ArduinoWebsockets.h>
 
 // WiFiClient on the Nicla Vision does not support setNoDelay(). The generic ESP
 // client wrapper used by ArduinoWebsockets expects it, so add a no-op stub.
@@ -15,12 +21,6 @@ public:
 
   void setNoDelay(bool) {}
 };
-
-// The ArduinoWebsockets library only defines a WSDefaultTcpServer for ESP and
-// Teensy targets. For the Nicla Vision we need to provide our own type so the
-// default constructor in server.hpp compiles.
-class WiFiNinaTcpServer;
-#define WSDefaultTcpServer WiFiNinaTcpServer
 
 // The ArduinoWebsockets library does not ship a default TcpServer implementation
 // for the Nicla Vision (WiFiNINA) platform, so we provide a minimal adapter that
@@ -88,8 +88,6 @@ protected:
 private:
   WiFiServer server;
 };
-
-#include <ArduinoWebsockets.h>
 
 using namespace websockets;
 
