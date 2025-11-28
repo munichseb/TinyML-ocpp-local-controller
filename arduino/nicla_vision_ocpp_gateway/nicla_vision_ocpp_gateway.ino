@@ -54,7 +54,7 @@ public:
   void close() override
   {
     yield();
-    server.stop();
+    server.end();
   }
 
   virtual ~WiFiNinaTcpServer()
