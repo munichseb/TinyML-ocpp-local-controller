@@ -17,6 +17,7 @@ Dieses Repository enthält einen Arduino-Sketch für einen lokalen OCPP 1.6 Edge
 - Bibliotheken über den Arduino Library Manager installieren:
   - `ArduinoHttpServer` (verfügbar im Library Manager)
   - `WebSockets2_Generic` (verfügbar im Library Manager)
+  - `WiFiWebServer` (verfügbar im Library Manager von Khoi Hoang)
 
 ## Einrichtung
 1. Arduino IDE öffnen und `arduino/nicla_vision_ocpp_gateway/nicla_vision_ocpp_gateway.ino` laden.
