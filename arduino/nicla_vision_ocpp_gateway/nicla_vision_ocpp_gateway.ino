@@ -33,9 +33,26 @@
 #include <WebSockets2_Generic.h>
 #include <WiFiWebServer.h>
 
-// Force-disable FlashIAP storage on Nicla builds to avoid missing symbol
-// errors on cores without FlashIAPBlockDevice support.
+// Detect availability of the Mbed FlashIAP + TDBStore stack.  Boards or cores
+// that do not ship these headers will automatically disable flash-backed
+// storage so the sketch can still compile.  Some platforms ship the headers
+// but explicitly disable the TDB internal storage via the
+// MBED_CONF_STORAGE_TDB_INTERNAL flag; treat that as unavailable to avoid
+// referencing undefined types.
+#if defined(HAS_MBED_FLASH)
+// Honor a user-provided definition.
+#elif defined(MBED_CONF_STORAGE_TDB_INTERNAL) && (MBED_CONF_STORAGE_TDB_INTERNAL == 0)
 #define HAS_MBED_FLASH 0
+#elif __has_include(<FlashIAPBlockDevice.h>) && __has_include(<TDBStore.h>)
+#define HAS_MBED_FLASH 1
+#else
+#define HAS_MBED_FLASH 0
+#endif
+
+#if HAS_MBED_FLASH
+#include <FlashIAPBlockDevice.h>
+#include <TDBStore.h>
+#endif
 
 using namespace websockets2_generic;
 
