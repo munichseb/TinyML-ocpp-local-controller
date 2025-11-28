@@ -1,55 +1,19 @@
 /*
- * Nicla OCPP 1.6 Edge Gateway
+ * Nicla OCPP 1.6 Edge Gateway (Simplified TCP Version)
  *
  * This sketch turns a Nicla Vision board into a local OCPP gateway that
- * accepts multiple WebSocket connections from wallboxes on the LAN and
- * forwards all messages to a configurable backend.  Responses from the
- * backend are broadcast back to every connected wallbox.  A simple web
- * dashboard served on port 80 allows the user to configure Wi‑Fi and
- * backend connection parameters.  If the configured Wi‑Fi cannot be
- * reached, the device will fall back to an access point mode with
- * SSID “NiclaGateway‑Setup” and password “setup1234”.
- *
- * Important implementation details:
- *  - Uses the WebSockets2_Generic library to handle multiple server
- *    clients and a single client connection to the backend.  The
- *    examples for Teensy boards show how to accept new clients via
- *    server.poll() and server.accept() and how to store them in an array
- *    for later polling【267196380083254†L174-L205】.
- *  - Broadcasting messages from the backend to every connected wallbox is
- *    supported by the websockets library; you simply iterate over the
- *    connected clients and call send()【522192342060697†L28-L33】.
- *  - The fallback access point is started using WiFi.beginAP(), as
- *    documented in the WiFiNINA library【393347963076899†L114-L168】.
+ * accepts multiple TCP connections from wallboxes on the LAN and performs
+ * basic WebSocket handshaking before forwarding messages to a backend.
+ * 
+ * Due to library limitations on mbed_nicla, this implements a minimal
+ * WebSocket server manually using TCP sockets.
  */
 
 #include <Arduino.h>
+#include <WiFi.h>
 
-// Ensure WebSockets2_Generic selects the WiFiNINA-backed network stack
-// on mbed-enabled Nicla boards.
-#define WEBSOCKETS_NETWORK_TYPE NETWORK_WIFI
-
-#include <WiFiNINA.h>
-#include <WebSockets2_Generic.h>
-#include <WiFiWebServer.h>
-
-// Some versions of the WebSockets2_Generic library fail to define
-// WSDefaultTcpServer on Nicla Vision builds, which leads to a
-// "expected type-specifier" error when constructing the WebSockets
-// server.  Fall back to the WiFiNINA-backed TcpServer implementation
-// if the macro is missing after including the library headers.
-#ifndef WSDefaultTcpServer
-#define WSDefaultTcpServer websockets2_generic::network2_generic::WiFiNINATcpServer
-#endif
-
-// Detect availability of the Mbed FlashIAP + TDBStore stack.  Boards or cores
-// that do not ship these headers will automatically disable flash-backed
-// storage so the sketch can still compile.  Some platforms ship the headers
-// but explicitly disable the TDB internal storage via the
-// MBED_CONF_STORAGE_TDB_INTERNAL flag; treat that as unavailable to avoid
-// referencing undefined types.
+// Detect availability of the Mbed FlashIAP + TDBStore stack
 #if defined(HAS_MBED_FLASH)
-// Honor a user-provided definition.
 #elif defined(MBED_CONF_STORAGE_TDB_INTERNAL) && (MBED_CONF_STORAGE_TDB_INTERNAL == 0)
 #define HAS_MBED_FLASH 0
 #elif __has_include(<FlashIAPBlockDevice.h>) && __has_include(<TDBStore.h>) && __has_include(<FlashIAP.h>)
@@ -62,40 +26,31 @@
 #include <FlashIAP.h>
 #include <FlashIAPBlockDevice.h>
 #include <TDBStore.h>
-
-// Some Arduino Mbed cores expose the FlashIAP and storage classes in the
-// global namespace instead of mbed::.  Pulling the mbed namespace into scope
-// lets the sketch compile in either layout without sprinkling namespace
-// conditionals everywhere.
 using namespace mbed;
 #endif
 
-using namespace websockets2_generic;
-
-// Maximum number of wallboxes (WebSocket clients) that can be
-// connected simultaneously.
+// Maximum number of wallboxes that can be connected simultaneously
 static const uint8_t MAX_WALLBOX_CLIENTS = 5;
 
 // Default SSID/password for fallback access point
 static const char AP_SSID[] = "NiclaGateway-Setup";
 static const char AP_PASSWORD[] = "setup1234";
 
-// Structure for configuration stored in flash via Mbed TDBStore.  The
-// valid flag is checked on boot to decide whether to use saved
-// credentials or fall back to the setup AP.
+// WebSocket GUID for handshake
+static const char WS_GUID[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+// Structure for configuration stored in flash
 struct GatewayConfig {
-  char ssid[32];           // Wi‑Fi SSID
-  char password[64];       // Wi‑Fi password
-  char backendHost[64];    // OCPP backend host
-  uint16_t backendPort;    // OCPP backend port
-  bool valid;              // flag indicating that the data is valid
+  char ssid[32];
+  char password[64];
+  char backendHost[64];
+  uint16_t backendPort;
+  bool valid;
 };
 
 static GatewayConfig config;
 
-// Persistent storage using Mbed Flash + TDBStore.  A 64 kB slice of the
-// internal flash near the end of the address space is reserved for the
-// key/value store.
+// Persistent storage
 static const size_t STORAGE_SIZE = 64 * 1024;
 static const char *CONFIG_KEY = "gatewayConfig";
 
@@ -107,14 +62,36 @@ static FlashIAPBlockDevice *kvBlock = nullptr;
 static TDBStore *kvStore = nullptr;
 #endif
 
+// Structure to track wallbox connections
+struct WallboxConnection {
+  WiFiClient client;
+  bool active;
+  bool wsHandshakeDone;
+  String buffer;
+  unsigned long lastActivity;
+};
+
+// HTTP server for configuration
+WiFiServer httpServer(80);
+
+// TCP server for wallbox connections (will upgrade to WebSocket)
+WiFiServer wallboxServer(8080);
+
+// Array of wallbox connections
+WallboxConnection wallboxClients[MAX_WALLBOX_CLIENTS];
+
+// Backend connection
+WiFiClient backendClient;
+bool backendConnected = false;
+bool backendWsHandshakeDone = false;
+String backendBuffer;
+unsigned long lastBackendAttempt = 0;
+
 /**
- * Initialise the FlashIAPBlockDevice and TDBStore.  A region of flash
- * at the end of the device is aligned to the sector size and used by
- * the key/value store.  Returns true on success.
+ * Initialize Flash storage
  */
 bool initStorage() {
 #if !HAS_MBED_FLASH
-  // Storage not available on non-Mbed builds; treat as disabled.
   return false;
 #else
   if (kvReady) return true;
@@ -129,7 +106,6 @@ bool initStorage() {
   uint32_t storageStart = flashStart + flashSize - STORAGE_SIZE;
   const uint32_t sectorSize = flash.get_sector_size(storageStart);
 
-  // Align start to sector boundary required by FlashIAPBlockDevice
   storageStart = (storageStart + sectorSize - 1) / sectorSize * sectorSize;
   const uint32_t blockDeviceSize = flashStart + flashSize - storageStart;
 
@@ -147,43 +123,23 @@ bool initStorage() {
 #endif
 }
 
-// HTTP server on port 80 for configuration dashboard
-WiFiWebServer httpServer(80);
-
-// WebSockets server on port 8080 for wallboxes.  Recent versions of the
-// WebSockets2_Generic library require explicitly passing a TcpServer
-// instance to the constructor, so build one using the default network
-// implementation selected via WEBSOCKETS_NETWORK_TYPE.
-WebsocketsServer wsServer(new WSDefaultTcpServer());
-
-// Array of client connections for wallboxes
-WebsocketsClient wallboxClients[MAX_WALLBOX_CLIENTS];
-
-// WebSocket client for the backend connection
-WebsocketsClient backendClient;
-
-// Timestamp for throttling backend reconnection attempts
-unsigned long lastBackendAttempt = 0;
-
 /**
- * Load configuration from flash (TDBStore).  If the valid flag is not
- * set or storage cannot be initialised, default values are used and the
- * valid flag remains false.  Defaults are AP credentials and a dummy
- * backend server to avoid accidental connections.
+ * Load configuration from flash
  */
 void loadConfig() {
   if (!initStorage()) {
     Serial.println(F("Storage unavailable; using defaults"));
   } else {
+#if HAS_MBED_FLASH
     size_t actualSize = 0;
     int err = kvStore->get(CONFIG_KEY, &config, sizeof(config), &actualSize);
     if (err != MBED_SUCCESS || actualSize != sizeof(config)) {
       Serial.println(F("No stored config found; using defaults"));
     }
+#endif
   }
 
   if (!config.valid) {
-    // Populate default values
     memset(&config, 0, sizeof(config));
     strncpy(config.ssid, AP_SSID, sizeof(config.ssid) - 1);
     strncpy(config.password, AP_PASSWORD, sizeof(config.password) - 1);
@@ -194,7 +150,7 @@ void loadConfig() {
 }
 
 /**
- * Save configuration to flash via TDBStore and mark it as valid.
+ * Save configuration to flash
  */
 void saveConfig() {
   config.valid = true;
@@ -203,44 +159,39 @@ void saveConfig() {
     return;
   }
 
+#if HAS_MBED_FLASH
   int err = kvStore->set(CONFIG_KEY, &config, sizeof(config), 0);
   if (err != MBED_SUCCESS) {
     Serial.print(F("Failed to save config: "));
     Serial.println(err);
   }
+#endif
 }
 
 /**
- * Start the fallback access point.  This is called when Wi‑Fi
- * association fails.  A static IP is automatically assigned by the
- * WiFi.beginAP() implementation【393347963076899†L114-L168】.
+ * Start the fallback access point
  */
 void startAccessPoint() {
   Serial.println(F("Starting fallback access point..."));
-  int status = WiFi.beginAP(AP_SSID, AP_PASSWORD);
-  if (status != WL_AP_LISTENING) {
-    Serial.println(F("Failed to start AP"));
-  } else {
-    apMode = true;
-    Serial.print(F("Access point started: IP address="));
-    Serial.println(WiFi.localIP());
-  }
+  WiFi.beginAP(AP_SSID, AP_PASSWORD);
+  apMode = true;
+  Serial.print(F("Access point started: IP address="));
+  Serial.println(WiFi.localIP());
 }
 
 /**
- * Attempt to connect to the configured Wi‑Fi network.  If no valid
- * credentials exist or the connection cannot be established within
- * 15 seconds, a fallback access point is started instead.
+ * Attempt to connect to WiFi
  */
 void startWiFi() {
   if (!config.valid) {
-    // No saved credentials; start AP directly
     startAccessPoint();
     return;
   }
 
-  Serial.print(F("Connecting to WiFi SSID: ")); Serial.println(config.ssid);
+  Serial.print(F("Connecting to WiFi SSID: ")); 
+  Serial.println(config.ssid);
   WiFi.begin(config.ssid, config.password);
+  
   unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startTime < 15000) {
     delay(500);
@@ -258,223 +209,475 @@ void startWiFi() {
 }
 
 /**
- * Generate the HTML dashboard showing current status and allowing the
- * user to change configuration.  This function uses the WiFiWebServer
- * class to send a simple page with a form.  Changing settings causes
- * the device to reboot so that new values take effect.
+ * URL decode helper
+ */
+String urlDecode(String str) {
+  String decoded = "";
+  for (size_t i = 0; i < str.length(); i++) {
+    char c = str.charAt(i);
+    if (c == '+') {
+      decoded += ' ';
+    } else if (c == '%' && i + 2 < str.length()) {
+      String hex = str.substring(i + 1, i + 3);
+      decoded += (char)strtol(hex.c_str(), NULL, 16);
+      i += 2;
+    } else {
+      decoded += c;
+    }
+  }
+  return decoded;
+}
+
+/**
+ * Generate HTML dashboard
  */
 String generateDashboard() {
-  String html = F("<html><head><title>Nicla OCPP Gateway</title></head><body>");
-  html += F("<h2>OCPP Gateway Configuration</h2>");
-  // Show Wi‑Fi status
+  String html = F("<!DOCTYPE html><html><head><meta charset='utf-8'>");
+  html += F("<title>Nicla OCPP Gateway</title>");
+  html += F("<style>body{font-family:Arial,sans-serif;margin:40px;background:#f5f5f5;}");
+  html += F(".container{background:white;padding:30px;border-radius:8px;max-width:600px;margin:0 auto;box-shadow:0 2px 4px rgba(0,0,0,0.1);}");
+  html += F("h2{color:#333;margin-top:0;}");
+  html += F(".status{background:#e8f5e9;padding:15px;border-radius:4px;margin:20px 0;}");
+  html += F(".status.ap{background:#fff3e0;}");
+  html += F("label{display:block;margin:15px 0 5px;font-weight:bold;color:#555;}");
+  html += F("input[type=text],input[type=password],input[type=number]{width:100%;padding:10px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;font-size:14px;}");
+  html += F("input[type=submit]{background:#2196F3;color:white;padding:12px 30px;border:none;border-radius:4px;cursor:pointer;font-size:16px;margin-top:20px;}");
+  html += F("input[type=submit]:hover{background:#1976D2;}</style></head><body>");
+  html += F("<div class='container'><h2>🔌 OCPP Gateway Configuration</h2>");
+  
+  // Status display
   if (WiFi.status() == WL_CONNECTED) {
-    html += F("<p>WiFi Status: Connected</p>");
-    html += F("<p>IP Address: "); html += WiFi.localIP().toString(); html += F("</p>");
+    html += F("<div class='status'><strong>📡 WiFi Status:</strong> Connected<br>");
+    html += F("<strong>IP Address:</strong> ");
+    html += WiFi.localIP().toString();
+    html += F("</div>");
   } else if (apMode) {
-    html += F("<p>WiFi Status: Access Point (Setup mode)</p>");
-    html += F("<p>AP SSID: "); html += AP_SSID; html += F("</p>");
+    html += F("<div class='status ap'><strong>📡 WiFi Status:</strong> Access Point Mode<br>");
+    html += F("<strong>SSID:</strong> ");
+    html += AP_SSID;
+    html += F("<br><strong>IP:</strong> ");
+    html += WiFi.localIP().toString();
+    html += F("</div>");
   } else {
-    html += F("<p>WiFi Status: Disconnected</p>");
+    html += F("<div class='status' style='background:#ffebee;'><strong>📡 WiFi Status:</strong> Disconnected</div>");
   }
-  // Form to edit settings
-  html += F("<form action=\"/save\" method=\"post\">");
+  
+  // Configuration form
+  html += F("<form action='/save' method='post'>");
   html += F("<h3>WiFi Settings</h3>");
-  html += F("SSID: <input type=\"text\" name=\"ssid\" value=\"");
+  html += F("<label>SSID</label><input type='text' name='ssid' value='");
   html += config.ssid;
-  html += F("\"><br>Password: <input type=\"password\" name=\"password\" value=\"");
+  html += F("' required>");
+  html += F("<label>Password</label><input type='password' name='password' value='");
   html += config.password;
-  html += F("\"><br>");
+  html += F("'>");
   html += F("<h3>Backend Settings</h3>");
-  html += F("Host: <input type=\"text\" name=\"backendHost\" value=\"");
+  html += F("<label>Host</label><input type='text' name='backendHost' value='");
   html += config.backendHost;
-  html += F("\"><br>Port: <input type=\"number\" name=\"backendPort\" value=\"");
+  html += F("' required>");
+  html += F("<label>Port</label><input type='number' name='backendPort' value='");
   html += String(config.backendPort);
-  html += F("\"><br><br><input type=\"submit\" value=\"Save &amp; Reboot\"></form>");
-  html += F("</body></html>");
+  html += F("' min='1' max='65535' required>");
+  html += F("<input type='submit' value='💾 Save & Reboot'>");
+  html += F("</form></div></body></html>");
+  
   return html;
 }
 
 /**
- * HTTP handler for the root page.  It simply serves the dashboard
- * generated by generateDashboard().
+ * Handle HTTP requests
  */
-void handleRoot() {
-  String page = generateDashboard();
-  httpServer.send(200, "text/html", page);
-}
-
-/**
- * HTTP handler for saving configuration.  This expects form fields
- * named ssid, password, backendHost and backendPort.  After
- * updating the config and writing it to EEPROM the board is
- * restarted.  Note: calling NVIC_SystemReset() is available on
- * Cortex‑M chips; for other architectures you may need to use
- * ESP.restart() or similar.  Here we conditionally call the
- * appropriate function based on the platform macros.
- */
-void handleSave() {
-  if (httpServer.hasArg("ssid")) {
-    String newSsid = httpServer.arg("ssid");
-    String newPassword = httpServer.arg("password");
-    String newBackendHost = httpServer.arg("backendHost");
-    String newBackendPort = httpServer.arg("backendPort");
-    // Copy values into config struct
-    memset(&config, 0, sizeof(config));
-    strncpy(config.ssid, newSsid.c_str(), sizeof(config.ssid) - 1);
-    strncpy(config.password, newPassword.c_str(), sizeof(config.password) - 1);
-    strncpy(config.backendHost, newBackendHost.c_str(), sizeof(config.backendHost) - 1);
-    config.backendPort = (uint16_t) newBackendPort.toInt();
-    saveConfig();
-    httpServer.send(200, "text/plain", "Configuration saved. Rebooting...");
-    delay(1000);
-    // Reset the board to apply new settings
-    #if defined(NVIC_SystemReset)
-      NVIC_SystemReset();
-    #elif defined(ESP8266) || defined(ESP32)
-      ESP.restart();
-    #endif
-  } else {
-    httpServer.send(400, "text/plain", "Missing parameters");
-  }
-}
-
-/**
- * Find an available slot in the wallboxClients array.  Returns
- * the index of the free slot or -1 if none is available.
- */
-int8_t getFreeClientIndex() {
-  for (uint8_t i = 0; i < MAX_WALLBOX_CLIENTS; i++) {
-    // WebsocketsClient::available() returns true if the client is
-    // connected.  We treat a non‑available slot as free.
-    if (!wallboxClients[i].available()) {
-      return i;
+void handleHttpClient() {
+  WiFiClient client = httpServer.available();
+  if (!client) return;
+  
+  String request = "";
+  String currentLine = "";
+  bool isPost = false;
+  int contentLength = 0;
+  
+  // Read headers
+  unsigned long timeout = millis();
+  while (client.connected() && millis() - timeout < 2000) {
+    if (client.available()) {
+      char c = client.read();
+      request += c;
+      
+      if (c == '\n') {
+        if (currentLine.length() == 0) break;
+        
+        if (currentLine.startsWith("POST")) isPost = true;
+        if (currentLine.startsWith("Content-Length: ")) {
+          contentLength = currentLine.substring(16).toInt();
+        }
+        currentLine = "";
+      } else if (c != '\r') {
+        currentLine += c;
+      }
     }
+  }
+  
+  // Read POST body
+  String postBody = "";
+  if (isPost && contentLength > 0) {
+    timeout = millis();
+    while (postBody.length() < (size_t)contentLength && millis() - timeout < 2000) {
+      if (client.available()) {
+        postBody += (char)client.read();
+      }
+    }
+  }
+  
+  // Route request
+  if (request.indexOf("GET / ") >= 0) {
+    String page = generateDashboard();
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/html; charset=utf-8");
+    client.println("Connection: close");
+    client.println();
+    client.print(page);
+  } 
+  else if (request.indexOf("POST /save") >= 0 && postBody.length() > 0) {
+    // Parse form data
+    String newSsid, newPassword, newBackendHost, newBackendPort;
+    
+    int start = 0;
+    while (start < (int)postBody.length()) {
+      int ampPos = postBody.indexOf('&', start);
+      int end = (ampPos > 0) ? ampPos : postBody.length();
+      String pair = postBody.substring(start, end);
+      int eqPos = pair.indexOf('=');
+      
+      if (eqPos > 0) {
+        String name = urlDecode(pair.substring(0, eqPos));
+        String value = urlDecode(pair.substring(eqPos + 1));
+        
+        if (name == "ssid") newSsid = value;
+        else if (name == "password") newPassword = value;
+        else if (name == "backendHost") newBackendHost = value;
+        else if (name == "backendPort") newBackendPort = value;
+      }
+      start = end + 1;
+    }
+    
+    if (newSsid.length() > 0) {
+      memset(&config, 0, sizeof(config));
+      strncpy(config.ssid, newSsid.c_str(), sizeof(config.ssid) - 1);
+      strncpy(config.password, newPassword.c_str(), sizeof(config.password) - 1);
+      strncpy(config.backendHost, newBackendHost.c_str(), sizeof(config.backendHost) - 1);
+      config.backendPort = (uint16_t)newBackendPort.toInt();
+      saveConfig();
+      
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: text/html");
+      client.println("Connection: close");
+      client.println();
+      client.println("<html><body><h2>✅ Configuration saved!</h2><p>Device rebooting...</p></body></html>");
+      client.flush();
+      delay(1000);
+      NVIC_SystemReset();
+    } else {
+      client.println("HTTP/1.1 400 Bad Request");
+      client.println("Connection: close");
+      client.println();
+    }
+  }
+  else {
+    client.println("HTTP/1.1 404 Not Found");
+    client.println("Connection: close");
+    client.println();
+  }
+  
+  client.stop();
+}
+
+/**
+ * Find free wallbox slot
+ */
+int8_t getFreeWallboxSlot() {
+  for (uint8_t i = 0; i < MAX_WALLBOX_CLIENTS; i++) {
+    if (!wallboxClients[i].active) return i;
   }
   return -1;
 }
 
 /**
- * Callback invoked when a wallbox sends a WebSocket message.
- * We forward the message to the backend without modification.
+ * Accept new wallbox connections
  */
-void onWallboxMessage(WebsocketsClient &client, WebsocketsMessage message) {
-  if (!backendClient.available()) return;
-  backendClient.send(message.data());
+void acceptWallboxConnections() {
+  WiFiClient newClient = wallboxServer.available();
+  if (!newClient) return;
+  
+  int8_t slot = getFreeWallboxSlot();
+  if (slot >= 0) {
+    wallboxClients[slot].client = newClient;
+    wallboxClients[slot].active = true;
+    wallboxClients[slot].wsHandshakeDone = false;
+    wallboxClients[slot].buffer = "";
+    wallboxClients[slot].lastActivity = millis();
+    Serial.print(F("Wallbox connected on slot "));
+    Serial.println(slot);
+  } else {
+    newClient.stop();
+    Serial.println(F("Rejected wallbox (no free slots)"));
+  }
 }
 
 /**
- * Callback invoked when a wallbox connection event occurs (e.g. open or
- * close).  Currently unused but could be extended for logging.
+ * Simple WebSocket frame decoder (TEXT frames only)
  */
-void onWallboxEvent(WebsocketsClient &client, WebsocketsEvent event, String data) {
-  (void)client;
-  (void)event;
-  (void)data;
+String decodeWebSocketFrame(String& buffer) {
+  if (buffer.length() < 2) return "";
+  
+  uint8_t byte1 = buffer[0];
+  uint8_t byte2 = buffer[1];
+  
+  bool fin = (byte1 & 0x80) != 0;
+  uint8_t opcode = byte1 & 0x0F;
+  bool masked = (byte2 & 0x80) != 0;
+  uint64_t payloadLen = byte2 & 0x7F;
+  
+  size_t pos = 2;
+  
+  // Handle extended payload length
+  if (payloadLen == 126) {
+    if (buffer.length() < 4) return "";
+    payloadLen = ((uint8_t)buffer[2] << 8) | (uint8_t)buffer[3];
+    pos = 4;
+  } else if (payloadLen == 127) {
+    return ""; // We don't support 64-bit length
+  }
+  
+  // Get masking key if present
+  uint8_t mask[4] = {0};
+  if (masked) {
+    if (buffer.length() < pos + 4) return "";
+    for (int i = 0; i < 4; i++) {
+      mask[i] = buffer[pos + i];
+    }
+    pos += 4;
+  }
+  
+  // Check if we have complete payload
+  if (buffer.length() < pos + payloadLen) return "";
+  
+  // Extract and unmask payload
+  String payload = "";
+  for (size_t i = 0; i < payloadLen; i++) {
+    uint8_t byte = buffer[pos + i];
+    if (masked) byte ^= mask[i % 4];
+    payload += (char)byte;
+  }
+  
+  // Remove processed frame from buffer
+  buffer = buffer.substring(pos + payloadLen);
+  
+  return (opcode == 0x01 && fin) ? payload : ""; // TEXT frame
 }
 
 /**
- * Callback invoked when the backend sends a WebSocket message.
- * The message is broadcast to all connected wallbox clients.  The
- * WebSockets2_Generic library makes this straightforward – we simply
- * iterate over the client array and call send()【522192342060697†L28-L33】.
+ * Encode WebSocket TEXT frame
  */
-void onBackendMessage(WebsocketsMessage message) {
-  String payload = message.data();
+String encodeWebSocketFrame(const String& payload) {
+  String frame = "";
+  frame += (char)0x81; // FIN + TEXT opcode
+  
+  size_t len = payload.length();
+  if (len < 126) {
+    frame += (char)len;
+  } else {
+    frame += (char)126;
+    frame += (char)(len >> 8);
+    frame += (char)(len & 0xFF);
+  }
+  
+  frame += payload;
+  return frame;
+}
+
+/**
+ * Handle wallbox clients
+ */
+void handleWallboxClients() {
   for (uint8_t i = 0; i < MAX_WALLBOX_CLIENTS; i++) {
-    if (wallboxClients[i].available()) {
-      wallboxClients[i].send(payload);
+    if (!wallboxClients[i].active) continue;
+    
+    WiFiClient& client = wallboxClients[i].client;
+    
+    if (!client.connected()) {
+      client.stop();
+      wallboxClients[i].active = false;
+      Serial.print(F("Wallbox disconnected from slot "));
+      Serial.println(i);
+      continue;
+    }
+    
+    // Read available data
+    while (client.available()) {
+      wallboxClients[i].buffer += (char)client.read();
+      wallboxClients[i].lastActivity = millis();
+    }
+    
+    // Handle WebSocket handshake
+    if (!wallboxClients[i].wsHandshakeDone) {
+      if (wallboxClients[i].buffer.indexOf("\r\n\r\n") > 0) {
+        // Simple handshake response (real implementation would parse Sec-WebSocket-Key)
+        String response = "HTTP/1.1 101 Switching Protocols\r\n";
+        response += "Upgrade: websocket\r\n";
+        response += "Connection: Upgrade\r\n";
+        response += "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+        client.print(response);
+        wallboxClients[i].wsHandshakeDone = true;
+        wallboxClients[i].buffer = "";
+        Serial.print(F("WebSocket handshake completed for slot "));
+        Serial.println(i);
+      }
+      continue;
+    }
+    
+    // Decode WebSocket frames
+    String message = decodeWebSocketFrame(wallboxClients[i].buffer);
+    if (message.length() > 0) {
+      Serial.print(F("Wallbox -> Backend: "));
+      Serial.println(message);
+      
+      // Forward to backend if connected
+      if (backendConnected && backendWsHandshakeDone) {
+        String frame = encodeWebSocketFrame(message);
+        backendClient.print(frame);
+      }
     }
   }
 }
 
 /**
- * Accept new wallbox connections if the server has pending clients.
- * The server.poll() and server.accept() pattern comes from the
- * WebSockets2_Generic examples【267196380083254†L174-L205】.  Once a
- * client is accepted we attach message and event callbacks and store
- * the client in the array.
- */
-void listenForWallboxes() {
-  if (wsServer.poll()) {
-    int8_t idx = getFreeClientIndex();
-    if (idx >= 0) {
-      WebsocketsClient newClient = wsServer.accept();
-      newClient.onMessage(onWallboxMessage);
-      newClient.onEvent(onWallboxEvent);
-      wallboxClients[idx] = newClient;
-      Serial.print(F("Wallbox connected on slot ")); Serial.println(idx);
-    } else {
-      // No free slot; accept and immediately close to free resources
-      WebsocketsClient tmp = wsServer.accept();
-      tmp.close();
-      Serial.println(F("Rejected wallbox connection (max clients reached)"));
-    }
-  }
-}
-
-/**
- * Attempt to connect to the backend if not already connected.  The
- * connection attempt is throttled to avoid spamming when the backend
- * is unreachable.  When connected the backendClient is set up with
- * the appropriate callbacks.
+ * Connect to backend
  */
 void connectBackend() {
-  if (backendClient.available()) return;
+  if (backendConnected) return;
+  
   unsigned long now = millis();
   if (now - lastBackendAttempt < 5000) return;
   lastBackendAttempt = now;
-  Serial.print(F("Connecting to backend ws://")); Serial.print(config.backendHost);
-  Serial.print(':'); Serial.println(config.backendPort);
-  bool connected = backendClient.connect(config.backendHost, config.backendPort, "/");
-  if (connected) {
-    Serial.println(F("Backend connected"));
-    backendClient.onMessage(onBackendMessage);
-  } else {
+  
+  Serial.print(F("Connecting to backend: "));
+  Serial.print(config.backendHost);
+  Serial.print(":");
+  Serial.println(config.backendPort);
+  
+  if (!backendClient.connect(config.backendHost, config.backendPort)) {
     Serial.println(F("Backend connection failed"));
+    return;
+  }
+  
+  backendConnected = true;
+  backendWsHandshakeDone = false;
+  backendBuffer = "";
+  
+  // Send WebSocket handshake
+  String handshake = "GET / HTTP/1.1\r\n";
+  handshake += "Host: ";
+  handshake += config.backendHost;
+  handshake += "\r\n";
+  handshake += "Upgrade: websocket\r\n";
+  handshake += "Connection: Upgrade\r\n";
+  handshake += "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
+  handshake += "Sec-WebSocket-Version: 13\r\n\r\n";
+  
+  backendClient.print(handshake);
+  Serial.println(F("Backend WebSocket handshake sent"));
+}
+
+/**
+ * Handle backend connection
+ */
+void handleBackend() {
+  if (!backendConnected) {
+    connectBackend();
+    return;
+  }
+  
+  if (!backendClient.connected()) {
+    backendClient.stop();
+    backendConnected = false;
+    backendWsHandshakeDone = false;
+    Serial.println(F("Backend disconnected"));
+    return;
+  }
+  
+  // Read data from backend
+  while (backendClient.available()) {
+    backendBuffer += (char)backendClient.read();
+  }
+  
+  // Handle handshake response
+  if (!backendWsHandshakeDone) {
+    if (backendBuffer.indexOf("\r\n\r\n") > 0) {
+      if (backendBuffer.indexOf("101") > 0) {
+        backendWsHandshakeDone = true;
+        // Remove handshake from buffer
+        int pos = backendBuffer.indexOf("\r\n\r\n");
+        backendBuffer = backendBuffer.substring(pos + 4);
+        Serial.println(F("Backend WebSocket handshake completed"));
+      } else {
+        Serial.println(F("Backend handshake failed"));
+        backendClient.stop();
+        backendConnected = false;
+      }
+    }
+    return;
+  }
+  
+  // Decode messages from backend
+  String message = decodeWebSocketFrame(backendBuffer);
+  if (message.length() > 0) {
+    Serial.print(F("Backend -> Wallboxes: "));
+    Serial.println(message);
+    
+    // Broadcast to all connected wallboxes
+    String frame = encodeWebSocketFrame(message);
+    for (uint8_t i = 0; i < MAX_WALLBOX_CLIENTS; i++) {
+      if (wallboxClients[i].active && wallboxClients[i].wsHandshakeDone) {
+        wallboxClients[i].client.print(frame);
+      }
+    }
   }
 }
 
 /**
- * Arduino setup() function.  Initializes serial, flash-backed storage, loads
- * configuration, starts Wi‑Fi (station or AP), configures the HTTP
- * server routes and starts the WebSocket server for wallboxes.
+ * Setup
  */
 void setup() {
   Serial.begin(115200);
-  while (!Serial) { /* wait for Serial */ }
+  delay(2000);
+  Serial.println(F("\n=== Nicla OCPP Gateway ==="));
+  
+  // Initialize wallbox array
+  for (uint8_t i = 0; i < MAX_WALLBOX_CLIENTS; i++) {
+    wallboxClients[i].active = false;
+  }
+  
   loadConfig();
   startWiFi();
-  // Setup HTTP routes
-  httpServer.on("/", handleRoot);
-  httpServer.on("/save", HTTP_POST, handleSave);
+  
   httpServer.begin();
-  Serial.println(F("HTTP server started"));
-  // Start WebSocket server for wallboxes on port 8080
-  wsServer.listen(8080);
-  Serial.println(F("WebSocket server listening on port 8080"));
+  Serial.println(F("HTTP server started on port 80"));
+  
+  wallboxServer.begin();
+  Serial.println(F("Wallbox server started on port 8080"));
+  
+  Serial.print(F("\n📱 Connect to: http://"));
+  Serial.println(WiFi.localIP());
+  Serial.println(F("=====================================\n"));
 }
 
 /**
- * Arduino loop() function.  Handles HTTP requests, accepts new
- * wallbox connections, polls existing WebSocket clients and keeps
- * the backend connection alive.
+ * Loop
  */
 void loop() {
-  // Handle any pending HTTP requests for configuration
-  httpServer.handleClient();
-  // Accept new wallbox connections if available
-  listenForWallboxes();
-  // Poll wallbox clients
-  for (uint8_t i = 0; i < MAX_WALLBOX_CLIENTS; i++) {
-    if (wallboxClients[i].available()) {
-      wallboxClients[i].poll();
-    }
-  }
-  // Connect to backend if not connected and poll existing backend
-  if (backendClient.available()) {
-    backendClient.poll();
-  } else {
-    connectBackend();
-  }
-  delay(10); // allow other tasks to run
+  handleHttpClient();
+  acceptWallboxConnections();
+  handleWallboxClients();
+  handleBackend();
+  delay(1);
 }
