@@ -2,7 +2,8 @@
 #include <SPI.h>
 
 #include <WiFiNINA.h>
-#include <ArduinoWebsockets.h>
+#include <tiny_websockets/network/tcp_client.hpp>
+#include <tiny_websockets/network/tcp_server.hpp>
 
 // WiFiClient on the Nicla Vision does not support setNoDelay(). The generic ESP
 // client wrapper used by ArduinoWebsockets expects it, so add a no-op stub.
@@ -44,19 +45,19 @@ public:
     client.stop();
   }
 
-  bool connect(const WSString &host, int port) override
+  bool connect(const websockets::WSString &host, int port) override
   {
     yield();
     return client.connect(host.c_str(), port);
   }
 
-  void send(const WSString &data) override
+  void send(const websockets::WSString &data) override
   {
     yield();
     client.write(reinterpret_cast<const uint8_t *>(data.c_str()), data.length());
   }
 
-  void send(const WSString &&data) override
+  void send(const websockets::WSString &&data) override
   {
     send(data);
   }
@@ -67,7 +68,7 @@ public:
     client.write(data, len);
   }
 
-  WSString readLine() override
+  websockets::WSString readLine() override
   {
     yield();
     return client.readStringUntil('\n');
@@ -156,6 +157,14 @@ protected:
 private:
   WiFiServer server;
 };
+
+#ifndef WSDefaultTcpClient
+#define WSDefaultTcpClient WiFiNinaTcpClient
+#endif
+
+#ifndef WSDefaultTcpServer
+#define WSDefaultTcpServer WiFiNinaTcpServer
+#endif
 
 #include <ArduinoWebsockets.h>
 
