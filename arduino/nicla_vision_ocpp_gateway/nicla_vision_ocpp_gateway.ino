@@ -33,18 +33,9 @@
 #include <WebSockets2_Generic.h>
 #include <WiFiWebServer.h>
 
-#if defined(ARDUINO_ARCH_MBED) && defined(__has_include)
-  #if __has_include(<FlashIAP.h>) && __has_include(<FlashIAPBlockDevice.h>) && __has_include(<TDBStore.h>)
-    #include <FlashIAP.h>
-    #include <FlashIAPBlockDevice.h>
-    #include <TDBStore.h>
-    #define HAS_MBED_FLASH 1
-  #else
-    #define HAS_MBED_FLASH 0
-  #endif
-#else
-  #define HAS_MBED_FLASH 0
-#endif
+// Force-disable FlashIAP storage on Nicla builds to avoid missing symbol
+// errors on cores without FlashIAPBlockDevice support.
+#define HAS_MBED_FLASH 0
 
 using namespace websockets2_generic;
 
