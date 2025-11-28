@@ -24,12 +24,23 @@
  */
 
 #include <Arduino.h>
+
+// Ensure WebSockets2_Generic selects the WiFiNINA-backed network stack
+// on mbed-enabled Nicla boards.
+#define WEBSOCKETS_NETWORK_TYPE NETWORK_WIFI
+
 #include <WiFiNINA.h>
 #include <WebSockets2_Generic.h>
 #include <WiFiWebServer.h>
-#include <FlashIAP.h>
-#include <FlashIAPBlockDevice.h>
-#include <TDBStore.h>
+
+#if defined(ARDUINO_ARCH_MBED)
+  #include <FlashIAP.h>
+  #include <FlashIAPBlockDevice.h>
+  #include <TDBStore.h>
+  #define HAS_MBED_FLASH 1
+#else
+  #define HAS_MBED_FLASH 0
+#endif
 
 using namespace websockets2_generic;
 
@@ -61,9 +72,12 @@ static const size_t STORAGE_SIZE = 64 * 1024;
 static const char *CONFIG_KEY = "gatewayConfig";
 
 static bool kvReady = false;
+static bool apMode = false;
+#if HAS_MBED_FLASH
 static mbed::FlashIAP flash;
 static mbed::FlashIAPBlockDevice *kvBlock = nullptr;
 static mbed::TDBStore *kvStore = nullptr;
+#endif
 
 /**
  * Initialise the FlashIAPBlockDevice and TDBStore.  A region of flash
@@ -71,6 +85,10 @@ static mbed::TDBStore *kvStore = nullptr;
  * the key/value store.  Returns true on success.
  */
 bool initStorage() {
+#if !HAS_MBED_FLASH
+  // Storage not available on non-Mbed builds; treat as disabled.
+  return false;
+#else
   if (kvReady) return true;
 
   if (flash.init() != 0) {
@@ -98,6 +116,7 @@ bool initStorage() {
 
   kvReady = true;
   return true;
+#endif
 }
 
 // HTTP server on port 80 for configuration dashboard
@@ -171,6 +190,7 @@ void startAccessPoint() {
   if (status != WL_AP_LISTENING) {
     Serial.println(F("Failed to start AP"));
   } else {
+    apMode = true;
     Serial.print(F("Access point started: IP address="));
     Serial.println(WiFi.localIP());
   }
@@ -219,7 +239,7 @@ String generateDashboard() {
   if (WiFi.status() == WL_CONNECTED) {
     html += F("<p>WiFi Status: Connected</p>");
     html += F("<p>IP Address: "); html += WiFi.localIP().toString(); html += F("</p>");
-  } else if (WiFi.getMode() == WL_AP_MODE) {
+  } else if (apMode) {
     html += F("<p>WiFi Status: Access Point (Setup mode)</p>");
     html += F("<p>AP SSID: "); html += AP_SSID; html += F("</p>");
   } else {
