@@ -52,6 +52,12 @@
 #if HAS_MBED_FLASH
 #include <FlashIAPBlockDevice.h>
 #include <TDBStore.h>
+
+// Some Arduino Mbed cores expose the FlashIAP and storage classes in the
+// global namespace instead of mbed::.  Pulling the mbed namespace into scope
+// lets the sketch compile in either layout without sprinkling namespace
+// conditionals everywhere.
+using namespace mbed;
 #endif
 
 using namespace websockets2_generic;
@@ -86,9 +92,9 @@ static const char *CONFIG_KEY = "gatewayConfig";
 static bool kvReady = false;
 static bool apMode = false;
 #if HAS_MBED_FLASH
-static mbed::FlashIAP flash;
-static mbed::FlashIAPBlockDevice *kvBlock = nullptr;
-static mbed::TDBStore *kvStore = nullptr;
+static FlashIAP flash;
+static FlashIAPBlockDevice *kvBlock = nullptr;
+static TDBStore *kvStore = nullptr;
 #endif
 
 /**
@@ -117,8 +123,8 @@ bool initStorage() {
   storageStart = (storageStart + sectorSize - 1) / sectorSize * sectorSize;
   const uint32_t blockDeviceSize = flashStart + flashSize - storageStart;
 
-  kvBlock = new mbed::FlashIAPBlockDevice(storageStart, blockDeviceSize);
-  kvStore = new mbed::TDBStore(kvBlock);
+  kvBlock = new FlashIAPBlockDevice(storageStart, blockDeviceSize);
+  kvStore = new TDBStore(kvBlock);
   int err = kvStore->init();
   if (err != MBED_SUCCESS) {
     Serial.print(F("KV init failed: "));
