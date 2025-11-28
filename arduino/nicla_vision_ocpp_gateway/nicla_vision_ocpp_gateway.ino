@@ -27,7 +27,9 @@
 #include <WiFiNINA.h>
 #include <WebSockets2_Generic.h>
 #include <WebServer.h>
-#include <EEPROM.h>
+#include <FlashIAP.h>
+#include <FlashIAPBlockDevice.h>
+#include <TDBStore.h>
 
 using namespace websockets2_generic;
 
@@ -39,9 +41,9 @@ static const uint8_t MAX_WALLBOX_CLIENTS = 5;
 static const char AP_SSID[] = "NiclaGateway-Setup";
 static const char AP_PASSWORD[] = "setup1234";
 
-// Structure for configuration stored in EEPROM.  The valid flag is
-// checked on boot to decide whether to use saved credentials or fall
-// back to the setup AP.
+// Structure for configuration stored in flash via Mbed TDBStore.  The
+// valid flag is checked on boot to decide whether to use saved
+// credentials or fall back to the setup AP.
 struct GatewayConfig {
   char ssid[32];           // Wi‑Fi SSID
   char password[64];       // Wi‑Fi password
@@ -52,10 +54,51 @@ struct GatewayConfig {
 
 static GatewayConfig config;
 
-// EEPROM address and length.  The EEPROM library is used to persist
-// configuration between reboots.  Changing the size of GatewayConfig
-// requires updating EEPROM_SIZE accordingly.
-static const int EEPROM_SIZE = sizeof(GatewayConfig);
+// Persistent storage using Mbed Flash + TDBStore.  A 64 kB slice of the
+// internal flash near the end of the address space is reserved for the
+// key/value store.
+static const size_t STORAGE_SIZE = 64 * 1024;
+static const char *CONFIG_KEY = "gatewayConfig";
+
+static bool kvReady = false;
+static mbed::FlashIAP flash;
+static mbed::FlashIAPBlockDevice *kvBlock = nullptr;
+static mbed::TDBStore *kvStore = nullptr;
+
+/**
+ * Initialise the FlashIAPBlockDevice and TDBStore.  A region of flash
+ * at the end of the device is aligned to the sector size and used by
+ * the key/value store.  Returns true on success.
+ */
+bool initStorage() {
+  if (kvReady) return true;
+
+  if (flash.init() != 0) {
+    Serial.println(F("Flash init failed"));
+    return false;
+  }
+
+  const uint32_t flashStart = flash.get_flash_start();
+  const uint32_t flashSize = flash.get_flash_size();
+  uint32_t storageStart = flashStart + flashSize - STORAGE_SIZE;
+  const uint32_t sectorSize = flash.get_sector_size(storageStart);
+
+  // Align start to sector boundary required by FlashIAPBlockDevice
+  storageStart = (storageStart + sectorSize - 1) / sectorSize * sectorSize;
+  const uint32_t blockDeviceSize = flashStart + flashSize - storageStart;
+
+  kvBlock = new mbed::FlashIAPBlockDevice(storageStart, blockDeviceSize);
+  kvStore = new mbed::TDBStore(kvBlock);
+  int err = kvStore->init();
+  if (err != MBED_SUCCESS) {
+    Serial.print(F("KV init failed: "));
+    Serial.println(err);
+    return false;
+  }
+
+  kvReady = true;
+  return true;
+}
 
 // HTTP server on port 80 for configuration dashboard
 WebServer httpServer(80);
@@ -73,13 +116,22 @@ WebsocketsClient backendClient;
 unsigned long lastBackendAttempt = 0;
 
 /**
- * Load configuration from EEPROM.  If the valid flag is not set or
- * EEPROM has not been initialised, default values are used and the
+ * Load configuration from flash (TDBStore).  If the valid flag is not
+ * set or storage cannot be initialised, default values are used and the
  * valid flag remains false.  Defaults are AP credentials and a dummy
  * backend server to avoid accidental connections.
  */
 void loadConfig() {
-  EEPROM.get(0, config);
+  if (!initStorage()) {
+    Serial.println(F("Storage unavailable; using defaults"));
+  } else {
+    size_t actualSize = 0;
+    int err = kvStore->get(CONFIG_KEY, &config, sizeof(config), &actualSize);
+    if (err != MBED_SUCCESS || actualSize != sizeof(config)) {
+      Serial.println(F("No stored config found; using defaults"));
+    }
+  }
+
   if (!config.valid) {
     // Populate default values
     memset(&config, 0, sizeof(config));
@@ -92,14 +144,20 @@ void loadConfig() {
 }
 
 /**
- * Save configuration to EEPROM and mark it as valid.  Calling
- * EEPROM.commit() writes the updated data to flash on boards that
- * require it.
+ * Save configuration to flash via TDBStore and mark it as valid.
  */
 void saveConfig() {
   config.valid = true;
-  EEPROM.put(0, config);
-  EEPROM.commit();
+  if (!initStorage()) {
+    Serial.println(F("Storage unavailable; config not saved"));
+    return;
+  }
+
+  int err = kvStore->set(CONFIG_KEY, &config, sizeof(config), 0);
+  if (err != MBED_SUCCESS) {
+    Serial.print(F("Failed to save config: "));
+    Serial.println(err);
+  }
 }
 
 /**
@@ -326,15 +384,13 @@ void connectBackend() {
 }
 
 /**
- * Arduino setup() function.  Initializes serial, EEPROM, loads
+ * Arduino setup() function.  Initializes serial, flash-backed storage, loads
  * configuration, starts Wi‑Fi (station or AP), configures the HTTP
  * server routes and starts the WebSocket server for wallboxes.
  */
 void setup() {
   Serial.begin(115200);
   while (!Serial) { /* wait for Serial */ }
-  // Initialise EEPROM
-  EEPROM.begin(EEPROM_SIZE);
   loadConfig();
   startWiFi();
   // Setup HTTP routes
