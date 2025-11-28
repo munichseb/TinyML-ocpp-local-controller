@@ -26,7 +26,7 @@
 #include <Arduino.h>
 #include <WiFiNINA.h>
 #include <WebSockets2_Generic.h>
-#include <WebServer.h>
+#include <WiFiWebServer.h>
 #include <FlashIAP.h>
 #include <FlashIAPBlockDevice.h>
 #include <TDBStore.h>
@@ -101,7 +101,7 @@ bool initStorage() {
 }
 
 // HTTP server on port 80 for configuration dashboard
-WebServer httpServer(80);
+WiFiWebServer httpServer(80);
 
 // WebSockets server on port 8080 for wallboxes
 WebsocketsServer wsServer;
@@ -208,7 +208,7 @@ void startWiFi() {
 
 /**
  * Generate the HTML dashboard showing current status and allowing the
- * user to change configuration.  This function uses the WebServer
+ * user to change configuration.  This function uses the WiFiWebServer
  * class to send a simple page with a form.  Changing settings causes
  * the device to reboot so that new values take effect.
  */
