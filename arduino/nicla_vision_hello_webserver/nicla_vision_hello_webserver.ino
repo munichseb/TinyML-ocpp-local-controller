@@ -22,90 +22,195 @@
  */
 
 #include <WiFi.h>
+#include <stdlib.h>
 
-#include "arduino_secrets.h" 
-///////please enter your sensitive data in the Secret tab/arduino_secrets.h
-char ssid[] = SECRET_SSID;        // your network SSID (name)
-char pass[] = SECRET_PASS;    // your network password (use for WPA, or use as key for WEP)
-int keyIndex = 0;                 // your network key index number (needed only for WEP)
+#if defined(ARDUINO_ARCH_MBED)
+#include <FlashIAPBlockDevice.h>
+#include <TDBStore.h>
+#include <FlashIAP.h>
+#define HAS_MBED_FLASH 1
+#else
+#define HAS_MBED_FLASH 0
+#endif
 
-int status = WL_IDLE_STATUS;
-WiFiServer server(80);
+// Access point credentials used for configuration when STA login fails
+static const char FALLBACK_AP_SSID[] = "NiclaVision-Setup";
+static const char FALLBACK_AP_PASSWORD[] = "nicla1234"; // minimum 8 chars
+
+// Simple WiFi credentials stored in flash
+struct WifiConfig {
+  char ssid[32];
+  char password[64];
+  bool valid;
+};
+
+static WifiConfig wifiConfig;
+
+static WiFiServer server(80);
+static bool apMode = false;
+
+#if HAS_MBED_FLASH
+static const size_t STORAGE_SIZE = 32 * 1024;
+static const char *CONFIG_KEY = "wifiConfig";
+static FlashIAP flash;
+static FlashIAPBlockDevice *kvBlock = nullptr;
+static TDBStore *kvStore = nullptr;
+static bool kvReady = false;
+#endif
+
+// Utility to URL-decode simple form values (handles %xx and '+').
+String urlDecode(const String &input) {
+  String decoded;
+  for (size_t i = 0; i < input.length(); i++) {
+    char c = input[i];
+    if (c == '+') {
+      decoded += ' ';
+    } else if (c == '%' && i + 2 < input.length()) {
+      char hex[3] = {input[i + 1], input[i + 2], '\0'};
+      decoded += (char) strtol(hex, nullptr, 16);
+      i += 2;
+    } else {
+      decoded += c;
+    }
+  }
+  return decoded;
+}
+
+#if HAS_MBED_FLASH
+bool initStorage() {
+  if (kvReady) return true;
+
+  if (flash.init() != 0) {
+    Serial.println(F("Flash init failed"));
+    return false;
+  }
+
+  const uint32_t flashStart = flash.get_flash_start();
+  const uint32_t flashSize = flash.get_flash_size();
+  uint32_t storageStart = flashStart + flashSize - STORAGE_SIZE;
+  const uint32_t sectorSize = flash.get_sector_size(storageStart);
+
+  storageStart = (storageStart + sectorSize - 1) / sectorSize * sectorSize;
+  const uint32_t blockDeviceSize = flashStart + flashSize - storageStart;
+
+  kvBlock = new FlashIAPBlockDevice(storageStart, blockDeviceSize);
+  kvStore = new TDBStore(kvBlock);
+  int err = kvStore->init();
+  if (err != MBED_SUCCESS) {
+    Serial.print(F("KV init failed: "));
+    Serial.println(err);
+    return false;
+  }
+
+  kvReady = true;
+  return true;
+}
+
+void loadWifiConfig() {
+  memset(&wifiConfig, 0, sizeof(wifiConfig));
+  if (!initStorage()) return;
+
+  size_t actualSize = 0;
+  int err = kvStore->get(CONFIG_KEY, &wifiConfig, sizeof(wifiConfig), &actualSize);
+  if (err != MBED_SUCCESS || actualSize != sizeof(wifiConfig)) {
+    memset(&wifiConfig, 0, sizeof(wifiConfig));
+  }
+}
+
+void saveWifiConfig() {
+  if (!initStorage()) return;
+  wifiConfig.valid = true;
+  int err = kvStore->set(CONFIG_KEY, &wifiConfig, sizeof(wifiConfig), 0);
+  if (err != MBED_SUCCESS) {
+    Serial.print(F("Failed to save config: "));
+    Serial.println(err);
+  }
+}
+#else
+void loadWifiConfig() { memset(&wifiConfig, 0, sizeof(wifiConfig)); }
+void saveWifiConfig() {}
+#endif
+
+bool connectToWifi() {
+  if (!wifiConfig.valid) return false;
+
+  Serial.print(F("Attempting WiFi connection to: "));
+  Serial.println(wifiConfig.ssid);
+  int status = WiFi.begin(wifiConfig.ssid, wifiConfig.password);
+  unsigned long start = millis();
+  while (status != WL_CONNECTED && millis() - start < 15000) {
+    delay(500);
+    status = WiFi.status();
+    Serial.print('.');
+  }
+  Serial.println();
+  return status == WL_CONNECTED;
+}
+
+void startAccessPoint() {
+  Serial.println(F("Starting fallback access point..."));
+  int status = WiFi.beginAP(FALLBACK_AP_SSID, FALLBACK_AP_PASSWORD);
+  if (status != WL_AP_LISTENING) {
+    Serial.println(F("Failed to start AP"));
+  } else {
+    Serial.print(F("Connect to WiFi network: "));
+    Serial.println(FALLBACK_AP_SSID);
+    Serial.print(F("IP address: "));
+    Serial.println(WiFi.localIP());
+    apMode = true;
+  }
+  server.begin();
+}
 
 void setup() {
-  Serial.begin(9600);      // initialize serial communication
-  pinMode(LED_BUILTIN, OUTPUT);      // set the LED pin mode
+  Serial.begin(9600);
+  pinMode(LED_BUILTIN, OUTPUT);
 
-  // check for the WiFi module:
+  loadWifiConfig();
+
   if (WiFi.status() == WL_NO_MODULE) {
-    Serial.println("Communication with WiFi module failed!");
-    // don't continue
+    Serial.println(F("Communication with WiFi module failed!"));
     while (true);
   }
 
-  // attempt to connect to WiFi network:
-  while (status != WL_CONNECTED) {
-    Serial.print("Attempting to connect to Network named: ");
-    Serial.println(ssid);                   // print the network name (SSID);
-
-    // Connect to WPA/WPA2 network. Change this line if using open or WEP network:
-    status = WiFi.begin(ssid, pass);
-    // wait 3 seconds for connection:
-    delay(3000);
+  if (connectToWifi()) {
+    server.begin();
+    apMode = false;
+    printWifiStatus();
+  } else {
+    Serial.println(F("WiFi connection failed, starting AP for configuration"));
+    startAccessPoint();
   }
-  server.begin();                           // start the web server on port 80
-  printWifiStatus();                        // you're connected now, so print out the status
 }
 
 
 void loop() {
-  WiFiClient client = server.accept();   // listen for incoming clients
-
-  if (client) {                             // if you get a client,
-    Serial.println("new client");           // print a message out the serial port
-    String currentLine = "";                // make a String to hold incoming data from the client
-    while (client.connected()) {            // loop while the client's connected
-      if (client.available()) {             // if there's bytes to read from the client,
-        char c = client.read();             // read a byte, then
-        Serial.write(c);                    // print it out to the serial monitor
-        if (c == '\n') {                    // if the byte is a newline character
-
-          // if the current line is blank, you got two newline characters in a row.
-          // that's the end of the client HTTP request, so send a response:
+  WiFiClient client = server.accept();
+  if (client) {
+    Serial.println(F("new client"));
+    String currentLine = "";
+    String requestLine = "";
+    while (client.connected()) {
+      if (client.available()) {
+        char c = client.read();
+        if (c == '\n') {
+          if (requestLine.length() == 0 && currentLine.length() > 0) {
+            requestLine = currentLine;
+          }
           if (currentLine.length() == 0) {
-            // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
-            // and a content-type so the client knows what's coming, then a blank line:
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-type:text/html");
-            client.println();
-
-            // the content of the HTTP response follows the header:
-            client.print("Click <a href=\"/H\">here</a> turn the LED on<br>");
-            client.print("Click <a href=\"/L\">here</a> turn the LED off<br>");
-
-            // The HTTP response ends with another blank line:
-            client.println();
-            // break out of the while loop:
+            // end of headers, serve response
+            handleRequest(client, requestLine);
             break;
-          } else {    // if you got a newline, then clear currentLine:
+          } else {
             currentLine = "";
           }
-        } else if (c != '\r') {  // if you got anything else but a carriage return character,
-          currentLine += c;      // add it to the end of the currentLine
-        }
-
-        // Check to see if the client request was "GET /H" or "GET /L":
-        if (currentLine.endsWith("GET /H")) {
-          digitalWrite(LED_BUILTIN, HIGH);               // GET /H turns the LED on
-        }
-        if (currentLine.endsWith("GET /L")) {
-          digitalWrite(LED_BUILTIN, LOW);                // GET /L turns the LED off
+        } else if (c != '\r') {
+          currentLine += c;
         }
       }
     }
-    // close the connection:
     client.stop();
-    Serial.println("client disconnected");
+    Serial.println(F("client disconnected"));
   }
 }
 
@@ -127,4 +232,96 @@ void printWifiStatus() {
   // print where to go in a browser:
   Serial.print("To see this page in action, open a browser to http://");
   Serial.println(ip);
+}
+
+String settingsPage() {
+  String page = F("<!doctype html><html><head><title>Nicla Vision Setup</title></head><body>");
+  page += F("<h2>Nicla Vision WiFi Setup</h2>");
+  if (WiFi.status() == WL_CONNECTED) {
+    page += F("<p>Status: Connected</p><p>IP: ");
+    page += WiFi.localIP().toString();
+    page += F("</p>");
+  } else if (apMode) {
+    page += F("<p>Status: Access Point mode (setup)</p>");
+  } else {
+    page += F("<p>Status: Disconnected</p>");
+  }
+
+  page += F("<form action=\"/save\" method=\"get\">");
+  page += F("SSID: <input type=\"text\" name=\"ssid\" value=\"");
+  page += wifiConfig.ssid;
+  page += F("\" required><br>\n");
+  page += F("Password: <input type=\"password\" name=\"password\" value=\"");
+  page += wifiConfig.password;
+  page += F("\" required><br>\n");
+  page += F("<input type=\"submit\" value=\"Save &amp; Connect\"></form><hr>");
+  page += F("<p>Use this page to configure WiFi credentials. When saved, the device will attempt to connect and store the details in flash.</p>");
+  page += F("</body></html>");
+  return page;
+}
+
+void handleSaveRequest(const String &query) {
+  int ssidIndex = query.indexOf("ssid=");
+  int passIndex = query.indexOf("password=");
+  if (ssidIndex == -1 || passIndex == -1) return;
+
+  int ssidEnd = query.indexOf('&', ssidIndex);
+  String ssidPart = query.substring(ssidIndex + 5, ssidEnd == -1 ? query.length() : ssidEnd);
+  String passPart = query.substring(passIndex + 9);
+
+  String newSsid = urlDecode(ssidPart);
+  String newPass = urlDecode(passPart);
+
+  memset(&wifiConfig, 0, sizeof(wifiConfig));
+  strncpy(wifiConfig.ssid, newSsid.c_str(), sizeof(wifiConfig.ssid) - 1);
+  strncpy(wifiConfig.password, newPass.c_str(), sizeof(wifiConfig.password) - 1);
+  wifiConfig.valid = true;
+  saveWifiConfig();
+
+  Serial.print(F("Saved new WiFi credentials for SSID: "));
+  Serial.println(wifiConfig.ssid);
+}
+
+void handleRequest(WiFiClient &client, const String &requestLine) {
+  String path = "/";
+  if (requestLine.startsWith("GET ")) {
+    int start = 4;
+    int end = requestLine.indexOf(' ', start);
+    if (end > start) {
+      path = requestLine.substring(start, end);
+    }
+  }
+
+  if (path.startsWith("/save")) {
+    int q = path.indexOf('?');
+    if (q != -1) {
+      handleSaveRequest(path.substring(q + 1));
+      // Try to connect with the new credentials
+      if (connectToWifi()) {
+        apMode = false;
+        server.begin();
+      } else if (!apMode) {
+        startAccessPoint();
+      }
+    }
+    client.println(F("HTTP/1.1 200 OK"));
+    client.println(F("Content-Type: text/html"));
+    client.println();
+    client.print(settingsPage());
+    return;
+  }
+
+  // Default page with LED controls and WiFi form
+  if (path.endsWith("/H")) {
+    digitalWrite(LED_BUILTIN, HIGH);
+  } else if (path.endsWith("/L")) {
+    digitalWrite(LED_BUILTIN, LOW);
+  }
+
+  client.println(F("HTTP/1.1 200 OK"));
+  client.println(F("Content-Type: text/html"));
+  client.println();
+  client.print(settingsPage());
+  client.println(F("<hr>Click <a href=\"/H\">here</a> to turn the LED on.<br>"));
+  client.println(F("Click <a href=\"/L\">here</a> to turn the LED off."));
 }
