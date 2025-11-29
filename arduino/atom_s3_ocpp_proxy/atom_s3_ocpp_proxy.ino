@@ -12,6 +12,8 @@ static const uint8_t MAX_WALLBOX_CLIENTS = 5;
 static const char *AP_SSID = "AtomS3-OCPP-Setup";
 static const char *AP_PASSWORD = "setup1234";
 
+static const uint8_t INVALID_WALLBOX_ID = 255;
+
 struct GatewayConfig {
   char ssid[32];
   char password[64];
@@ -26,10 +28,17 @@ bool apMode = false;
 
 WebServer httpServer(80);
 WebSocketsServer wallboxServer(WALLBOX_PORT);
-WebSocketsClient backendClient;
-unsigned long lastBackendAttempt = 0;
+WebSocketsClient backendClients[MAX_WALLBOX_CLIENTS];
 
-static bool wallboxActive[MAX_WALLBOX_CLIENTS] = {false};
+struct WallboxSession {
+  bool active;
+  uint8_t wallboxId;
+  unsigned long lastBackendAttempt;
+};
+
+WallboxSession sessions[MAX_WALLBOX_CLIENTS];
+
+using BackendEventHandler = void (*)(WStype_t type, uint8_t *payload, size_t length);
 
 void saveConfig() {
   prefs.begin("ocppgw");
@@ -50,6 +59,22 @@ void loadConfig() {
     strncpy(config.backendHost, "ocpp.example.com", sizeof(config.backendHost) - 1);
     config.backendPort = 9000;
   }
+}
+
+void resetSession(uint8_t slot) {
+  sessions[slot].active = false;
+  sessions[slot].wallboxId = INVALID_WALLBOX_ID;
+  sessions[slot].lastBackendAttempt = 0;
+  backendClients[slot].disconnect();
+}
+
+int8_t findSessionByWallbox(uint8_t wallboxId) {
+  for (uint8_t i = 0; i < MAX_WALLBOX_CLIENTS; i++) {
+    if (sessions[i].active && sessions[i].wallboxId == wallboxId) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 void startAccessPoint() {
@@ -132,32 +157,43 @@ void handleSave() {
   }
 }
 
-void onBackendMessage(WStype_t type, uint8_t *payload, size_t length) {
-  if (type == WStype_TEXT) {
-    wallboxServer.broadcastTXT(payload, length);
+void handleBackendMessage(uint8_t slot, WStype_t type, uint8_t *payload, size_t length) {
+  if (type == WStype_TEXT && sessions[slot].active && sessions[slot].wallboxId != INVALID_WALLBOX_ID) {
+    wallboxServer.sendTXT(sessions[slot].wallboxId, payload, length);
   }
 }
 
-void ensureBackendConnected() {
-  if (!config.valid) return;
-  if (backendClient.isConnected()) return;
-  if (millis() - lastBackendAttempt < 5000) return;
+void onBackendMessage0(WStype_t type, uint8_t *payload, size_t length) { handleBackendMessage(0, type, payload, length); }
+void onBackendMessage1(WStype_t type, uint8_t *payload, size_t length) { handleBackendMessage(1, type, payload, length); }
+void onBackendMessage2(WStype_t type, uint8_t *payload, size_t length) { handleBackendMessage(2, type, payload, length); }
+void onBackendMessage3(WStype_t type, uint8_t *payload, size_t length) { handleBackendMessage(3, type, payload, length); }
+void onBackendMessage4(WStype_t type, uint8_t *payload, size_t length) { handleBackendMessage(4, type, payload, length); }
 
-  lastBackendAttempt = millis();
-  Serial.print(F("Connecting to backend ws://"));
+BackendEventHandler backendHandlers[MAX_WALLBOX_CLIENTS] = {
+    onBackendMessage0, onBackendMessage1, onBackendMessage2, onBackendMessage3, onBackendMessage4};
+
+void ensureBackendConnected(uint8_t slot) {
+  if (!config.valid || !sessions[slot].active) return;
+  if (backendClients[slot].isConnected()) return;
+  if (millis() - sessions[slot].lastBackendAttempt < 5000) return;
+
+  sessions[slot].lastBackendAttempt = millis();
+  Serial.print(F("Connecting wallbox #"));
+  Serial.print(sessions[slot].wallboxId);
+  Serial.print(F(" to backend ws://"));
   Serial.print(config.backendHost);
   Serial.print(':');
   Serial.println(config.backendPort);
 
-  backendClient.begin(config.backendHost, config.backendPort, "/");
-  backendClient.onEvent(onBackendMessage);
-  backendClient.setReconnectInterval(5000);
+  backendClients[slot].begin(config.backendHost, config.backendPort, "/");
+  backendClients[slot].onEvent(backendHandlers[slot]);
+  backendClients[slot].setReconnectInterval(5000);
 }
 
 uint8_t activeClientCount() {
   uint8_t count = 0;
   for (uint8_t i = 0; i < MAX_WALLBOX_CLIENTS; i++) {
-    if (wallboxActive[i]) count++;
+    if (sessions[i].active) count++;
   }
   return count;
 }
@@ -170,20 +206,47 @@ void wallboxEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t length
         Serial.println(F("Rejected wallbox: limit reached"));
         return;
       }
-      wallboxActive[client % MAX_WALLBOX_CLIENTS] = true;
+      int8_t existingSlot = findSessionByWallbox(client);
+      if (existingSlot >= 0) {
+        resetSession(existingSlot);
+      }
+
+      int8_t freeSlot = -1;
+      for (uint8_t i = 0; i < MAX_WALLBOX_CLIENTS; i++) {
+        if (!sessions[i].active) {
+          freeSlot = i;
+          break;
+        }
+      }
+
+      if (freeSlot < 0) {
+        wallboxServer.disconnect(client);
+        Serial.println(F("Rejected wallbox: no session slot available"));
+        return;
+      }
+
+      sessions[freeSlot].active = true;
+      sessions[freeSlot].wallboxId = client;
       Serial.print(F("Wallbox connected: #"));
       Serial.println(client);
-      ensureBackendConnected();
+      ensureBackendConnected(freeSlot);
       break;
     }
     case WStype_DISCONNECTED:
-      wallboxActive[client % MAX_WALLBOX_CLIENTS] = false;
       Serial.print(F("Wallbox disconnected: #"));
       Serial.println(client);
+      int8_t disconnectSlot = findSessionByWallbox(client);
+      if (disconnectSlot >= 0) {
+        resetSession(disconnectSlot);
+      }
       break;
     case WStype_TEXT:
-      if (backendClient.isConnected()) {
-        backendClient.sendTXT(payload, length);
+      int8_t slot = findSessionByWallbox(client);
+      if (slot >= 0) {
+        ensureBackendConnected(slot);
+        if (backendClients[slot].isConnected()) {
+          backendClients[slot].sendTXT(payload, length);
+        }
       }
       break;
     default:
@@ -200,6 +263,9 @@ void setupHttpServer() {
 
 void setup() {
   Serial.begin(115200);
+  for (uint8_t i = 0; i < MAX_WALLBOX_CLIENTS; i++) {
+    resetSession(i);
+  }
   loadConfig();
   connectWiFi();
   setupHttpServer();
@@ -214,9 +280,13 @@ void loop() {
     connectWiFi();
   }
 
-  ensureBackendConnected();
+  for (uint8_t i = 0; i < MAX_WALLBOX_CLIENTS; i++) {
+    ensureBackendConnected(i);
+  }
 
   httpServer.handleClient();
   wallboxServer.loop();
-  backendClient.loop();
+  for (uint8_t i = 0; i < MAX_WALLBOX_CLIENTS; i++) {
+    backendClients[i].loop();
+  }
 }
